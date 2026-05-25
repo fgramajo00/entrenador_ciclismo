@@ -8,6 +8,11 @@ import anthropic
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN no está definido. Verificá las variables de entorno en Railway.")
+if not ANTHROPIC_API_KEY:
+    raise ValueError("ANTHROPIC_API_KEY no está definido. Verificá las variables de entorno en Railway.")
+
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 SYSTEM_PROMPT = """Actúas como entrenador de ciclismo profesional de alto rendimiento de Federico. Responde siempre en español. Sé técnico, directo y crítico. Sin frases motivacionales vacías.
