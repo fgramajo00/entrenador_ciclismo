@@ -1,5 +1,7 @@
 import os
 import asyncio
+import requests
+from datetime import date, datetime, timedelta
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -7,104 +9,163 @@ import anthropic
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+INTERVALS_ATHLETE_ID = os.environ.get("INTERVALS_ATHLETE_ID")
+INTERVALS_API_KEY = os.environ.get("INTERVALS_API_KEY")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN no está definido. Verificá las variables de entorno en Railway.")
+    raise ValueError("TELEGRAM_TOKEN no definido")
 if not ANTHROPIC_API_KEY:
-    raise ValueError("ANTHROPIC_API_KEY no está definido. Verificá las variables de entorno en Railway.")
+    raise ValueError("ANTHROPIC_API_KEY no definido")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
 MODEL = "claude-sonnet-4-6"
+
+INTERVALS_BASE = "https://intervals.icu/api/v1"
+
+def intervals_get(endpoint):
+    if not INTERVALS_ATHLETE_ID or not INTERVALS_API_KEY:
+        return None
+    try:
+        url = f"{INTERVALS_BASE}/athlete/{INTERVALS_ATHLETE_ID}{endpoint}"
+        r = requests.get(url, auth=("API_KEY", INTERVALS_API_KEY), timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except:
+        return None
+
+def get_athlete_profile():
+    return intervals_get("")
+
+def get_recent_activities(days=7):
+    oldest = (date.today() - timedelta(days=days)).isoformat()
+    newest = date.today().isoformat()
+    return intervals_get(f"/activities?oldest={oldest}&newest={newest}")
+
+def get_wellness(days=7):
+    oldest = (date.today() - timedelta(days=days)).isoformat()
+    newest = date.today().isoformat()
+    return intervals_get(f"/wellness?oldest={oldest}&newest={newest}")
+
+def get_todays_wellness():
+    today = date.today().isoformat()
+    data = intervals_get(f"/wellness?oldest={today}&newest={today}")
+    if data and len(data) > 0:
+        return data[0]
+    return None
+
+def build_data_context():
+    sections = []
+    
+    profile = get_athlete_profile()
+    if profile:
+        ftp = profile.get("ftp", "?")
+        weight = profile.get("weight", "?")
+        max_hr = profile.get("max_hr", "?")
+        rest_hr = profile.get("resting_hr", "?")
+        ctl = profile.get("ctl", "?")
+        atl = profile.get("atl", "?")
+        tsb = profile.get("tsb", "?")
+        sections.append(
+            f"DATOS INTERVALS.ICU EN VIVO:\n"
+            f"- FTP actual: {ftp}W\n"
+            f"- Peso: {weight} kg\n"
+            f"- W/kg: {round(ftp/weight, 2) if isinstance(ftp,(int,float)) and isinstance(weight,(int,float)) and weight > 0 else '?'}\n"
+            f"- FC max: {max_hr} bpm\n"
+            f"- FC reposo: {rest_hr} bpm\n"
+            f"- CTL (fitness): {ctl}\n"
+            f"- ATL (fatiga): {atl}\n"
+            f"- TSB (forma): {tsb}"
+        )
+    
+    wellness = get_todays_wellness()
+    if wellness:
+        w_parts = []
+        if wellness.get("weight"): w_parts.append(f"Peso hoy: {wellness['weight']} kg")
+        if wellness.get("restingHR"): w_parts.append(f"FC reposo hoy: {wellness['restingHR']} bpm")
+        if wellness.get("hrv"): w_parts.append(f"HRV: {wellness['hrv']}")
+        if wellness.get("sleepQuality"): w_parts.append(f"Calidad sueño: {wellness['sleepQuality']}")
+        if wellness.get("fatigue"): w_parts.append(f"Fatiga percibida: {wellness['fatigue']}")
+        if wellness.get("mood"): w_parts.append(f"Estado ánimo: {wellness['mood']}")
+        if wellness.get("motivation"): w_parts.append(f"Motivación: {wellness['motivation']}")
+        if wellness.get("sleepTime"): w_parts.append(f"Horas sueño: {wellness['sleepTime']}")
+        if w_parts:
+            sections.append("WELLNESS HOY:\n" + "\n".join(f"- {p}" for p in w_parts))
+    
+    activities = get_recent_activities(7)
+    if activities:
+        rides = [a for a in activities if a.get("type") in ("Ride", "VirtualRide", None)]
+        if rides:
+            act_lines = []
+            weekly_tss = 0
+            for a in rides[-7:]:
+                a_date = a.get("start_date_local", "")[:10]
+                a_name = a.get("name", "Sin nombre")
+                a_tss = a.get("icu_training_load", 0) or 0
+                a_if = a.get("icu_intensity", 0) or 0
+                a_dur = round((a.get("moving_time", 0) or 0) / 60)
+                a_np = a.get("icu_weighted_avg_watts", 0) or 0
+                a_avg = a.get("icu_average_watts", 0) or 0
+                a_hr = a.get("icu_average_hr", 0) or 0
+                weekly_tss += a_tss
+                act_lines.append(
+                    f"  {a_date} | {a_name} | {a_dur}min | "
+                    f"TSS:{round(a_tss)} IF:{round(a_if,2)} NP:{round(a_np)}W "
+                    f"Avg:{round(a_avg)}W HR:{round(a_hr)}bpm"
+                )
+            sections.append(
+                f"ACTIVIDADES ÚLTIMOS 7 DÍAS (TSS semanal: {round(weekly_tss)}):\n" + 
+                "\n".join(act_lines)
+            )
+    
+    if not sections:
+        return "\n[Intervals.icu no disponible - decidir con datos del plan]\n"
+    
+    return "\n\n".join(sections)
 
 SYSTEM_PROMPT = """Actúas como entrenador de ciclismo profesional de alto rendimiento de Federico. Responde siempre en español. Sé técnico, directo y crítico. Sin frases motivacionales vacías.
 
+IMPORTANTE: Antes de cada respuesta sobre entrenamiento se te inyectarán datos reales de Intervals.icu (CTL, ATL, TSB, últimas actividades, wellness). USÁ ESOS DATOS para tomar decisiones. No le pidas datos que ya tenés. Solo preguntale cosas subjetivas que no estén en los datos (sensación de piernas, dolor, motivación).
+
 PERFIL DE FEDERICO:
-- Hombre amateur, 74 kg actuales, objetivo 67 kg para agosto
-- FTP histórico: 256W (3.46 w/kg a 74kg)
-- FTP de trabajo actual: 190W (estimado conservador post 60 días inactividad)
-- FTP real estimado: ~225W
-- FC reposo: 53 bpm
+- Hombre amateur
+- FTP histórico pre-inactividad: 256W
+- 60 días sin entrenar antes de retomar (26 mayo 2026)
 - Sin estatinas, sin lesiones activas
-- 100% indoor, tiene potenciómetro y pulsómetro
+- 100% indoor, potenciómetro + pulsómetro
 - Plataformas: Zwift y MyWhoosh
-- Objetivo corto plazo: Transmontaña MTB 15 agosto, ~67kg y ~3.8-4.0 w/kg
+- Sesiones máximo 60-75 min (90 sábado). Rodillo es duro para la cabeza.
+- Objetivo corto plazo: Transmontaña MTB 15 agosto 2026, ~67kg y ~3.8-4.0 w/kg
 - Objetivo largo plazo: próximo año 5 w/kg
 
-PLAN MACRO (12 semanas):
-- Semanas 1-2: Reacondicionamiento (Z2 dominante, sin test)
-- Semanas 3-4: Construcción + Ramp Test real (semana 3, sábado)
-- Semanas 5-7: Base aeróbica (volumen + Tempo)
-- Semanas 8-10: Desarrollo FTP (Sweet Spot / Umbral)
-- Semanas 11-12: Especificidad MTB + Taper
+METODOLOGÍA:
+- Zonas Coggan basadas en FTP real de Intervals.icu
+- Periodización por TSS/IF/CTL/ATL/TSB
+- Déficit calórico 300-400 kcal/día máximo, proteína 2.0-2.2 g/kg
+- Priorizar consistencia, nunca carga extrema
+- Recomendar ERG mode para sesiones estructuradas, SIM mode para Z2 largo
+- Cada sesión tiene que tener variabilidad (cambios cada 5-15 min) para tolerar rodillo
 
-ZONAS COGGAN (base 190W):
-- Z1 Recuperación: <106W / <56% FTP
-- Z2 Resistencia: 106-143W / 56-75% FTP
-- Z3 Tempo: 144-171W / 76-90% FTP
-- Z4 Umbral: 173-200W / 91-105% FTP
-- Z5 VO2max: 201-228W / 106-120% FTP
-- Z6 Anaeróbico: 229-266W / 121-140% FTP
-- Z7 Neuromuscular: >266W / >140% FTP
-
-SEMANA 1 (26 mayo - 1 junio):
-- Lunes 26/05: Z2 continuo 60 min (TSS 42)
-- Martes 27/05: Z2 + cadencia alta 70 min (TSS 49)
-- Miércoles 28/05: Recuperación activa Z1 45 min (TSS 20)
-- Jueves 29/05: Z2 estructurado 70 min (TSS 49)
-- Viernes 30/05: Recuperación activa Z1 45 min (TSS 20)
-- Sábado 31/05: Z2 largo 75 min (TSS 53)
-- Domingo 01/06: Descanso total
-
-SEMANA 2 (2 - 8 junio):
-- Lunes: Z2 continuo 75 min (TSS 53)
-- Martes: Z2 + bloques Tempo suave 75 min (TSS 60)
-- Miércoles: Recuperación activa Z1 45 min (TSS 20)
-- Jueves: Z2 estructurado largo 90 min (TSS 63)
-- Viernes: Recuperación activa Z1 45 min (TSS 20)
-- Sábado: Z2/Z3 mixto 90 min (TSS 72)
-- Domingo: Descanso total
-
-SEMANA 3 (9 - 15 junio):
-- Lunes: Z2 continuo 75 min (TSS 53)
-- Martes: Sweet Spot 2x10 min 75 min (TSS 68)
-- Miércoles: Recuperación activa Z1 45 min (TSS 20)
-- Jueves: Sweet Spot 2x15 min 80 min (TSS 75)
-- Viernes: Descanso total
-- Sábado: RAMP TEST (TSS 50)
-- Domingo: Recuperación activa suave Z1 45 min (TSS 18)
-
-PROTOCOLO RAMP TEST:
-- Calentamiento 10 min Z1-Z2
-- Rampa: empezar 100W, subir 20W cada 1 minuto
-- Finalizar cuando no pueda mantener potencia por 15 segundos
-- FTP = 75% de la potencia máxima del último minuto completo
-- Modo ERG en Zwift/MyWhoosh
-
-NUTRICIÓN BASE:
-- Déficit: 300-400 kcal/día máximo
-- Proteína: 2.0-2.2 g/kg = 148-163g/día
-- Carbohidratos días entrenamiento: 3-4 g/kg
-- Hidratación sesión: 500-750ml/hora + electrolitos si >60 min
-- Post-entreno: proteína + carbs en primeros 30-45 min
+LÓGICA DE DECISIÓN AUTOMÁTICA:
+- Si TSB < -20: reducir carga, priorizar recuperación
+- Si TSB > 15: puede tolerar más carga
+- Si TSB entre -10 y 5: rango óptimo para entrenar
+- Si FC reposo subió >5bpm sobre línea base: día de recuperación o descanso
+- Si última actividad fue ayer con TSS > 80: hoy recuperación activa o descanso
+- Si no hay actividad hace >2 días: reactivar suave
+- Ajustar zonas automáticamente si FTP de Intervals.icu cambió
 
 FORMATO DE RESPUESTA PARA SESIONES:
-Cuando describes una sesión incluir siempre:
-1. Objetivo fisiológico (qué sistema, por qué, qué adaptación)
+1. Justificación basada en datos reales (CTL/ATL/TSB, última actividad)
 2. Protocolo estructurado (calentamiento, bloques con tiempo/zona/%FTP/watts/FC/cadencia/RPE, enfriamiento)
-3. Métricas (TSS, IF, Kcal estimadas)
+3. Métricas esperadas (TSS, IF, Kcal)
 4. Señales de alerta (cuándo cortar)
 5. Nutrición del día
 
 REGLAS CRÍTICAS:
-- Nunca proponer carga extrema en semanas 1 y 2
-- Si Federico reporta FC reposo >58 bpm: reducir carga
-- Si reporta mal sueño 2 noches seguidas: reducir carga
-- Si RPE en Z2 se siente como Z4: revisar FTP base
-- Domingo siempre es descanso total en semana 1 y 2
-- Priorizar consistencia sobre intensidad siempre
-- Ser crítico si Federico quiere saltear descansos o aumentar carga solo
-- Ajustar plan dinámicamente según feedback"""
+- NUNCA pedir datos que ya están en el contexto de Intervals.icu
+- Ser crítico si Federico quiere saltear descansos
+- Si los datos muestran sobreentrenamiento, negarse a dar sesión intensa"""
 
 conversations = {}
 
@@ -118,100 +179,128 @@ def trim_history(history: list, max_messages: int = 20) -> list:
         return history[-max_messages:]
     return history
 
+async def call_claude(history, extra_context=""):
+    system = SYSTEM_PROMPT
+    if extra_context:
+        system = f"{SYSTEM_PROMPT}\n\n{extra_context}"
+    
+    response = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: client.messages.create(
+            model=MODEL,
+            max_tokens=1500,
+            system=system,
+            messages=trim_history(history)
+        )
+    )
+    return response.content[0].text
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversations[user_id] = []
+    
+    intervals_status = "desconectado"
+    if INTERVALS_ATHLETE_ID and INTERVALS_API_KEY:
+        profile = get_athlete_profile()
+        if profile:
+            ftp = profile.get("ftp", "?")
+            weight = profile.get("weight", "?")
+            ctl = profile.get("ctl", "?")
+            intervals_status = f"conectado (FTP: {ftp}W | Peso: {weight}kg | CTL: {ctl})"
+    
     await update.message.reply_text(
-        "Coach activo.\n\n"
-        "Plan cargado: Semana 1 (26 mayo - 1 junio)\n"
-        "FTP base: 190W | Peso: 74 kg | Objetivo: Transmontaña 15/08\n\n"
-        "Comandos rápidos:\n"
-        "/sesion — sesión del día\n"
-        "/checkin — reporte semanal\n"
-        "/alerta — señales de fatiga\n"
-        "/reset — reiniciar conversación\n\n"
-        "O escribime directamente cualquier consulta."
+        f"Coach activo.\n\n"
+        f"Intervals.icu: {intervals_status}\n"
+        f"Objetivo: Transmontaña 15/08\n\n"
+        f"/sesion — sesión del día (lee tus datos automáticamente)\n"
+        f"/estado — tu CTL/ATL/TSB + últimas actividades\n"
+        f"/checkin — análisis semanal automático\n"
+        f"/alerta — señales de fatiga\n"
+        f"/reset — reiniciar conversación\n\n"
+        f"O escribime directamente cualquier consulta."
     )
 
 async def cmd_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     history = get_history(user_id)
     
-    from datetime import date
-    today = date.today().strftime("%A %d/%m/%Y")
-    prompt = f"Hoy es {today}. Dame la sesión de hoy completa con todos los bloques, métricas y nutrición."
-    
-    history.append({"role": "user", "content": prompt})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
-    response = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: client.messages.create(
-            model=MODEL,
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=history
-        )
-    )
+    data_context = build_data_context()
+    today = date.today().strftime("%A %d/%m/%Y")
     
-    reply = response.content[0].text
-    history.append({"role": "assistant", "content": reply})
-    conversations[user_id] = trim_history(history)
+    prompt = f"Hoy es {today}. Basándote en mis datos reales de Intervals.icu, dame la sesión de hoy."
+    history.append({"role": "user", "content": prompt})
     
-    for chunk in split_message(reply):
-        await update.message.reply_text(chunk)
+    try:
+        reply = await call_claude(history, data_context)
+        history.append({"role": "assistant", "content": reply})
+        conversations[user_id] = trim_history(history)
+        for chunk in split_message(reply):
+            await update.message.reply_text(chunk)
+    except Exception as e:
+        history.pop()
+        await update.message.reply_text(f"Error: {type(e).__name__}: {e}")
+
+async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    
+    data = build_data_context()
+    if "no disponible" in data:
+        await update.message.reply_text("No pude conectar con Intervals.icu. Verificá las credenciales.")
+        return
+    
+    await update.message.reply_text(data)
 
 async def cmd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     history = get_history(user_id)
     
-    prompt = "Iniciá el checkin semanal. Preguntame los datos que necesitás para evaluar la semana y ajustar el plan."
-    history.append({"role": "user", "content": prompt})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
-    response = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: client.messages.create(
-            model=MODEL,
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=history
-        )
+    data_context = build_data_context()
+    
+    prompt = (
+        "Hacé el análisis semanal completo basándote en los datos reales de Intervals.icu. "
+        "Evaluá: progresión de CTL, carga acumulada, calidad de sesiones, "
+        "tendencia de peso, y decidí si hay que ajustar el plan para la próxima semana."
     )
+    history.append({"role": "user", "content": prompt})
     
-    reply = response.content[0].text
-    history.append({"role": "assistant", "content": reply})
-    conversations[user_id] = trim_history(history)
-    
-    for chunk in split_message(reply):
-        await update.message.reply_text(chunk)
+    try:
+        reply = await call_claude(history, data_context)
+        history.append({"role": "assistant", "content": reply})
+        conversations[user_id] = trim_history(history)
+        for chunk in split_message(reply):
+            await update.message.reply_text(chunk)
+    except Exception as e:
+        history.pop()
+        await update.message.reply_text(f"Error: {type(e).__name__}: {e}")
 
 async def cmd_alerta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     history = get_history(user_id)
     
-    prompt = "¿Cuáles son las señales de alerta y sobreentrenamiento que debo monitorear esta semana?"
-    history.append({"role": "user", "content": prompt})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
-    response = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: client.messages.create(
-            model=MODEL,
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=history
-        )
-    )
+    data_context = build_data_context()
     
-    reply = response.content[0].text
-    history.append({"role": "assistant", "content": reply})
-    conversations[user_id] = trim_history(history)
+    prompt = "Analizá mis datos actuales y decime si hay alguna señal de alerta o sobreentrenamiento."
+    history.append({"role": "user", "content": prompt})
     
-    for chunk in split_message(reply):
-        await update.message.reply_text(chunk)
+    try:
+        reply = await call_claude(history, data_context)
+        history.append({"role": "assistant", "content": reply})
+        conversations[user_id] = trim_history(history)
+        for chunk in split_message(reply):
+            await update.message.reply_text(chunk)
+    except Exception as e:
+        history.pop()
+        await update.message.reply_text(f"Error: {type(e).__name__}: {e}")
 
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversations[user_id] = []
-    await update.message.reply_text("Conversación reiniciada. Contexto del plan mantenido.")
+    await update.message.reply_text("Conversación reiniciada.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -221,25 +310,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": user_text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
+    data_context = build_data_context()
+    
     try:
-        response = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: client.messages.create(
-                model=MODEL,
-                max_tokens=1000,
-                system=SYSTEM_PROMPT,
-                messages=trim_history(history)
-            )
-        )
-        
-        reply = response.content[0].text
+        reply = await call_claude(history, data_context)
         history.append({"role": "assistant", "content": reply})
         conversations[user_id] = trim_history(history)
-        
         for chunk in split_message(reply):
             await update.message.reply_text(chunk)
     except Exception as e:
         history.pop()
-        await update.message.reply_text(f"Error API: {type(e).__name__}: {e}")
+        await update.message.reply_text(f"Error: {type(e).__name__}: {e}")
 
 def split_message(text: str, max_length: int = 4000) -> list:
     if len(text) <= max_length:
@@ -260,6 +341,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sesion", cmd_sesion))
+    app.add_handler(CommandHandler("estado", cmd_estado))
     app.add_handler(CommandHandler("checkin", cmd_checkin))
     app.add_handler(CommandHandler("alerta", cmd_alerta))
     app.add_handler(CommandHandler("reset", cmd_reset))
