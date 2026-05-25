@@ -15,6 +15,8 @@ if not ANTHROPIC_API_KEY:
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+MODEL = "claude-3-5-sonnet-20241022"
+
 SYSTEM_PROMPT = """Actúas como entrenador de ciclismo profesional de alto rendimiento de Federico. Responde siempre en español. Sé técnico, directo y crítico. Sin frases motivacionales vacías.
 
 PERFIL DE FEDERICO:
@@ -144,7 +146,7 @@ async def cmd_sesion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response = await asyncio.get_event_loop().run_in_executor(
         None, lambda: client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=MODEL,
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=history
@@ -168,7 +170,7 @@ async def cmd_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response = await asyncio.get_event_loop().run_in_executor(
         None, lambda: client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=MODEL,
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=history
@@ -192,7 +194,7 @@ async def cmd_alerta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response = await asyncio.get_event_loop().run_in_executor(
         None, lambda: client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=MODEL,
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=history
@@ -222,7 +224,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response = await asyncio.get_event_loop().run_in_executor(
             None, lambda: client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=MODEL,
                 max_tokens=1000,
                 system=SYSTEM_PROMPT,
                 messages=trim_history(history)
