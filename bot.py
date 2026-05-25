@@ -219,21 +219,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": user_text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
-    response = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=trim_history(history)
+    try:
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1000,
+                system=SYSTEM_PROMPT,
+                messages=trim_history(history)
+            )
         )
-    )
-    
-    reply = response.content[0].text
-    history.append({"role": "assistant", "content": reply})
-    conversations[user_id] = trim_history(history)
-    
-    for chunk in split_message(reply):
-        await update.message.reply_text(chunk)
+        
+        reply = response.content[0].text
+        history.append({"role": "assistant", "content": reply})
+        conversations[user_id] = trim_history(history)
+        
+        for chunk in split_message(reply):
+            await update.message.reply_text(chunk)
+    except Exception as e:
+        history.pop()
+        await update.message.reply_text(f"Error API: {type(e).__name__}: {e}")
 
 def split_message(text: str, max_length: int = 4000) -> list:
     if len(text) <= max_length:
